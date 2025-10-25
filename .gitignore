@@ -1,0 +1,66 @@
+# --- Python build / packaging ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+*.dll
+*.log
+*.tmp
+
+# --- Virtual environments ---
+.env
+.venv
+env/
+venv/
+ENV/
+Pipfile.lock
+poetry.lock
+
+# --- Jupyter & IDE junk ---
+.ipynb_checkpoints/
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+
+# --- macOS metadata ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# --- Bytecode caches and temp files ---
+*.swp
+*.swo
+*~
+.cache/
+.mypy_cache/
+.pytest_cache/
+__MACOSX/
+
+# --- Build / dist directories ---
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Output plots and data ---
+*_results/
+
+# --- Miscellaneous ---
+*.bak
+*.orig
+*.old
+*.zip
+*.tar
+*.gz
+
+# --- OS trash ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
