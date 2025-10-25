@@ -48,9 +48,6 @@ dist/
 *.egg-info/
 .eggs/
 
-# --- Output plots and data ---
-*_results/
-
 # --- Miscellaneous ---
 *.bak
 *.orig
