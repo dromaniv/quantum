@@ -15,27 +15,36 @@ import os
 
 def bell_state(label: str) -> QuantumCircuit:
     """
-    Build an *unmeasured* 2-qubit circuit that prepares:
+    Build:
       'phi_plus'  = (|00> + |11>)/√2
       'phi_minus' = (|00> - |11>)/√2
       'psi_plus'  = (|01> + |10>)/√2
       'psi_minus' = (|01> - |10>)/√2
+    Gates are applied before the entangling CX to match the baseline circuits.
     """
     qc = QuantumCircuit(2, 2, name=label)
 
-    # Start from |00>, create Φ+ then adjust with X/Z to reach the requested Bell state
-    qc.h(0)
-    qc.cx(0, 1)
-
+    # Build circuits to match the baseline diagrams exactly:
+    #   phi_plus  : H(q0); CX(q0->q1)
+    #   phi_minus : X(q0); H(q0); CX(q0->q1)
+    #   psi_plus  : H(q0); X(q1); CX(q0->q1)
+    #   psi_minus : X(q0); X(q1); H(q0); CX(q0->q1)
     if label == "phi_plus":
-        pass
+        qc.h(0)
+        qc.cx(0, 1)
     elif label == "phi_minus":
-        qc.z(0)            # adds relative minus on |11>
+        qc.x(0)
+        qc.h(0)
+        qc.cx(0, 1)
     elif label == "psi_plus":
-        qc.x(1)            # flips second qubit: |01> + |10>
-    elif label == "psi_minus":
+        qc.h(0)
         qc.x(1)
-        qc.z(0)
+        qc.cx(0, 1)
+    elif label == "psi_minus":
+        qc.x(0)
+        qc.x(1)
+        qc.h(0)
+        qc.cx(0, 1)
     else:
         raise ValueError("label must be one of: phi_plus, phi_minus, psi_plus, psi_minus")
 
@@ -51,6 +60,9 @@ def add_measurement(qc: QuantumCircuit, basis: str) -> QuantumCircuit:
       'XZ' : H on qubit 0 only; qubit 1 in Z
     """
     c = deepcopy(qc)
+
+    # Add a visual barrier to separate state preparation from measurement basis gates
+    c.barrier()
 
     if basis == "ZZ":
         pass
@@ -71,7 +83,7 @@ def add_measurement(qc: QuantumCircuit, basis: str) -> QuantumCircuit:
     return c
 
 
-def run_and_plot(circuits, shots=4096, title_prefix=""):
+def run_and_plot(circuits, shots=1024, title_prefix=""):
     """
     Transpile for AerSimulator, run, and plot distributions.
     Returns list of (counts, fig) for convenience.
@@ -126,7 +138,7 @@ for name, qc in bells.items():
 
 # Run and plot ZZ distributions (tasks 1–4 results)
 zz_circuits = [add_measurement(qc, "ZZ") for qc in bells.values()]
-zz_results = run_and_plot(zz_circuits, shots=4096, title_prefix="Result: ")
+zz_results = run_and_plot(zz_circuits, shots=1024, title_prefix="Result: ")
 
 
 # ------------------------------------------------------------
@@ -146,9 +158,9 @@ for c in xx_circuits + yy_circuits + xz_circuits:
     draw_and_show(c, title=f"{c.name} - circuit")
 
 # Run and plot results
-xx_results = run_and_plot(xx_circuits, shots=4096, title_prefix="Result: ")
-yy_results = run_and_plot(yy_circuits, shots=4096, title_prefix="Result: ")
-xz_results = run_and_plot(xz_circuits, shots=4096, title_prefix="Result: ")
+xx_results = run_and_plot(xx_circuits, shots=1024, title_prefix="Result: ")
+yy_results = run_and_plot(yy_circuits, shots=1024, title_prefix="Result: ")
+xz_results = run_and_plot(xz_circuits, shots=1024, title_prefix="Result: ")
 
 
 # ------------------------------------------------------------
