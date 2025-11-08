@@ -1,73 +1,81 @@
-# chsh_mdpi.py
-# Complete CHSH experiment on |Ψ-> with repetition, uncertainty, and MDPI-style plots.
-# Qiskit Aer simulator; swap in a hardware backend if desired.
-
+# chsh_lab_exact.py
+# CHSH on |Ψ-> with lab-exact circuits/plots (no Ry). Saves ALL outputs to p2_results.
 from __future__ import annotations
-from collections import defaultdict
-import numpy as np
+import os
 from dataclasses import dataclass
 from typing import Dict, Tuple, List
+from collections import defaultdict
+
+import numpy as np
+import matplotlib.pyplot as plt
 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
+from qiskit.circuit.library import HGate, SGate, TGate, TdgGate
 
-# ---------------- Configuration ----------------
-SHOTS = 1024          # Shots per setting per run (assignment uses 1024)
-N_RUNS = 5            # Number of independent repeats for uncertainty (Task 2.1 suggests ~5)
-BASE_SEED = None      # Set to an int for reproducibility; None = nondeterministic seeds
-SAVE_FIGS = True      # Save figures to disk (PDF + PNG)
-SHOW_FIGS = False     # Show figures interactively
+# ---------------- Config ----------------
+SHOTS = 1024
+N_RUNS = 5
+OUTDIR = "p2_results"  # everything goes here
 
-# ---------------- State preparation & measurement ----------------
+os.makedirs(OUTDIR, exist_ok=True)
 
-def prepare_psi_minus(qc: QuantumCircuit):
-    """Prepare |Ψ-> = (|10> - |01>)/√2 on qubits 0,1."""
-    qc.x(1)       # |01>
+# ---------------- Lab-exact state prep & measurements ----------------
+def prepare_psi_minus_lab(qc: QuantumCircuit):
+    """
+    Lab slide exact |Ψ-> prep from |00>:
+      X on both qubits, H on q0, CX(0->1).  (No Z.)
+    """
+    qc.x(0)
+    qc.x(1)
     qc.h(0)
-    qc.cx(0, 1)   # Bell
-    qc.z(0)       # Map to Ψ- up to global phase
+    qc.cx(0, 1)
     return qc
 
-def rotate_to_basis(qc: QuantumCircuit, qubit: int, basis: str):
-    """
-    Basis choices:
-      'Z' : measure Z (no rotation)
-      'X' : H† Z H = X  ⇒ apply H before Z-measure
-      'W' : U† Z U = (Z + X)/√2 with U = R_y(-π/4)
-      'V' : U† Z U = (Z - X)/√2 with U = R_y(+π/4)
-    """
-    from qiskit.circuit.library import HGate, RYGate
-    if basis == "Z":
-        return
-    elif basis == "X":
-        qc.append(HGate(), [qubit])
-    elif basis == "W":
-        qc.append(RYGate(-np.pi/4), [qubit])
-    elif basis == "V":
-        qc.append(RYGate(+np.pi/4), [qubit])
+def apply_bottom_measurement(qc: QuantumCircuit, basis: str, qb: int):
+    """Bottom (Alice): Z or X only. X = H, Z = no rotation."""
+    if basis == "X":
+        qc.append(HGate(), [qb])
+    elif basis == "Z":
+        pass
     else:
-        raise ValueError(f"Unknown basis '{basis}'. Use one of: Z, X, W, V.")
+        raise ValueError("Bottom must be 'X' or 'Z'.")
 
-def make_measure_circuit(a_basis: str, b_basis: str) -> QuantumCircuit:
+def apply_top_measurement(qc: QuantumCircuit, basis: str, qt: int):
     """
-    Build the full circuit:
-      - Prepare |Ψ->
-      - Rotate qubit 0 to a_basis, qubit 1 to b_basis
-      - Measure in Z, store as classical bits [a b] (left bit=a, right bit=b)
+    Top (Bob): W or V only.
+      W = S–H–T–H
+      V = S–H–T†–H
     """
-    qc = QuantumCircuit(2, 2, name=f"{a_basis}⊗{b_basis}")
-    prepare_psi_minus(qc)
+    if basis == "W":
+        qc.append(SGate(), [qt]); qc.append(HGate(), [qt]); qc.append(TGate(), [qt]); qc.append(HGate(), [qt])
+    elif basis == "V":
+        qc.append(SGate(), [qt]); qc.append(HGate(), [qt]); qc.append(TdgGate(), [qt]); qc.append(HGate(), [qt])
+    else:
+        raise ValueError("Top must be 'W' or 'V'.")
+
+def make_measure_circuit(bottom_basis: str, top_basis: str) -> QuantumCircuit:
+    """
+    Build circuit in the lab convention:
+      top wire (q0) = W/V  ; bottom wire (q1) = X/Z
+      classical mapping: top → c1, bottom → c0  (so readout strings are 'ab')
+    """
+    qc = QuantumCircuit(2, 2, name=f"{bottom_basis}⊗{top_basis}")
+    # |Ψ-> prep (slide exact)
+    prepare_psi_minus_lab(qc)
     qc.barrier()
-    rotate_to_basis(qc, 0, a_basis)
-    rotate_to_basis(qc, 1, b_basis)
+    # rotate to requested measurement bases
+    apply_top_measurement(qc,   top_basis,    0)  # q0 (top)
+    apply_bottom_measurement(qc, bottom_basis, 1)  # q1 (bottom)
     qc.barrier()
-    # Measure so that readout string is "ab"
-    qc.measure(0, 1)  # a -> c1 (left char)
-    qc.measure(1, 0)  # b -> c0 (right char)
+    # measure: top→c1, bottom→c0  (bitstring "ab")
+    qc.measure(0, 0)  # a (top) -> c1
+    qc.measure(1, 1)  # b (bottom) -> c0
     return qc
 
+# ---------------- Stats helpers ----------------
 def counts_to_probs(counts: Dict[str, int], shots: int) -> Dict[Tuple[int, int], float]:
-    """Convert {'ab': count} to p(a,b) with a,b∈{0,1}; ensure all outcomes present."""
+    """Convert {'ab': count} to p(a,b) with a,b∈{0,1}."""
     p = defaultdict(float)
     for key, c in counts.items():
         s = key.replace(" ", "")
@@ -80,186 +88,158 @@ def counts_to_probs(counts: Dict[str, int], shots: int) -> Dict[Tuple[int, int],
     return dict(p)
 
 def expected_value_from_probs(pab: Dict[Tuple[int, int], float]) -> float:
-    """E = Σ v(a)v(b) p(a,b) with mapping 0→+1, 1→−1."""
+    """E = Σ v(a)v(b) p(a,b) with 0→+1, 1→−1."""
     v = {0: +1, 1: -1}
     return sum(v[a] * v[b] * p for (a, b), p in pab.items())
 
-# ---------------- Single-run execution ----------------
+# ---------------- Run & summarize ----------------
+@dataclass
+class RunResult:
+    counts: Dict[str, int]
+    probs: Dict[Tuple[int, int], float]
+    E: float
 
-def run_setting(a_basis: str, b_basis: str, shots: int, backend, seed: int | None):
-    circ = make_measure_circuit(a_basis, b_basis)
-    tcirc = transpile(circ, backend)
-    job = backend.run(tcirc, shots=shots, seed_simulator=seed)
-    result = job.result()
-    counts = result.get_counts(tcirc)
+def run_setting(bottom_basis: str, top_basis: str, shots: int, backend) -> RunResult:
+    circ = make_measure_circuit(bottom_basis, top_basis)
+    tc = transpile(circ, backend)
+    job = backend.run(tc, shots=shots)
+    res = job.result()
+    counts = res.get_counts(tc)
     pab = counts_to_probs(counts, shots)
     E = expected_value_from_probs(pab)
-    return {"counts": counts, "p": pab, "E": E}
+    return RunResult(counts=counts, probs=pab, E=E)
 
-def run_all(shots: int, seed: int | None = None):
+def run_all(shots: int = SHOTS, n_runs: int = N_RUNS):
     """
-    Run the four CHSH settings and compute S = E(Z,W)+E(Z,V)+E(X,W)-E(X,V).
-    Returns a dict keyed by setting tags and 'S', '|S|'.
+    Combos in lab order: (bottom, top)
+      X⊗W, X⊗V, Z⊗W, Z⊗V
     """
     backend = AerSimulator()
-    labels = [("Z", "W", "ZW"), ("Z", "V", "ZV"), ("X", "W", "XW"), ("X", "V", "XV")]
-    out: Dict[str, dict] = {}
-    for a, b, tag in labels:
-        out[tag] = run_setting(a, b, shots=shots, backend=backend, seed=seed)
-    S = out["ZW"]["E"] + out["ZV"]["E"] + out["XW"]["E"] - out["XV"]["E"]
-    out["S"] = float(S)
-    out["|S|"] = float(abs(S))
-    return out
-
-# ---------------- Repetition & statistics (Task 2.1) ----------------
-
-@dataclass
-class Summary:
-    shots: int
-    n_runs: int
-    s_abs_values: List[float]
-    mean_abs_s: float
-    std_abs_s: float
-    E_matrix: np.ndarray   # shape (n_runs, 4) in order [ZW, ZV, XW, XV]
-    E_mean: np.ndarray     # shape (4,)
-    E_std: np.ndarray      # shape (4,)
-
-def repeat_and_summarize(n_runs: int = N_RUNS, shots: int = SHOTS, base_seed: int | None = BASE_SEED) -> Tuple[Summary, List[dict]]:
-    tags = ["ZW", "ZV", "XW", "XV"]
-    per_run_results: List[dict] = []
-    E_runs = np.zeros((n_runs, 4), dtype=float)
-    s_abs = []
-
+    combos = [("X", "W"), ("X", "V"), ("Z", "W"), ("Z", "V")]
+    per_run = []
+    E_by_run = []
     for r in range(n_runs):
-        seed = None if base_seed is None else (base_seed + r)
-        res = run_all(shots=shots, seed=seed)
-        per_run_results.append(res)
-        s_abs.append(res["|S|"])
-        E_runs[r, :] = [res[t]["E"] for t in tags]
+        row = {}
+        for b, t in combos:
+            rr = run_setting(b, t, shots, backend)
+            row[f"E_{b}{t}"] = rr.E
+            per_run.append(((b, t), rr))
+        S = row["E_ZW"] + row["E_ZV"] + row["E_XW"] - row["E_XV"]
+        row["S"] = S
+        E_by_run.append(row)
+    return combos, per_run, E_by_run
 
-    s_abs = np.array(s_abs, dtype=float)
-    E_mean = E_runs.mean(axis=0)
-    E_std = E_runs.std(axis=0, ddof=1) if n_runs > 1 else np.zeros(4)
+# ---------------- Saving utilities ----------------
+def save_circuit_images():
+    backend = AerSimulator()
+    for b, t in [("X","W"),("X","V"),("Z","W"),("Z","V")]:
+        circ = make_measure_circuit(b, t)
+        path_png = os.path.join(OUTDIR, f"circ_{b}{t}.png")
+        path_pdf = os.path.join(OUTDIR, f"circ_{b}{t}.pdf")
+        fig = circ.draw(output="mpl")
+        fig.savefig(path_png, bbox_inches="tight", dpi=300)
+        fig.savefig(path_pdf, bbox_inches="tight")
+        plt.close(fig)
 
-    summary = Summary(
-        shots=shots,
-        n_runs=n_runs,
-        s_abs_values=list(s_abs),
-        mean_abs_s=float(s_abs.mean()),
-        std_abs_s=float(s_abs.std(ddof=1)) if n_runs > 1 else 0.0,
-        E_matrix=E_runs,
-        E_mean=E_mean,
-        E_std=E_std,
-    )
-    return summary, per_run_results
-
-# ---------------- Plotting (MDPI-friendly single-panel figures) ----------------
-
-def _apply_mdpi_rc():
-    import matplotlib as mpl
-    import matplotlib.pyplot as plt
-    # Serif font, modest sizes; figure width ~12 cm
-    mpl.rcParams.update({
-        "font.family": "serif",
-        "font.size": 10,
-        "axes.labelsize": 10,
-        "axes.titlesize": 11,
-        "legend.fontsize": 9,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 9,
-        "figure.figsize": (4.72, 3.54),  # ~12cm x 9cm
-        "figure.dpi": 100,
-        "savefig.dpi": 300,
-        "savefig.bbox": "tight",
-    })
-    return plt
-
-def plot_E_bars(summary: Summary, save_prefix: str = "fig_E_bars"):
+def save_probability_plots(all_runs: List[Tuple[Tuple[str,str], RunResult]]):
     """
-    Bar plot of mean E with 1σ error bars across runs.
-    Saves PDF and PNG if SAVE_FIGS is True.
+    For each measurement type, show bar plots of outcome probabilities across the N runs.
     """
-    plt = _apply_mdpi_rc()
-    import matplotlib.pyplot as plt
+    order = ["00","01","10","11"]
+    for b, t in [("X","W"),("X","V"),("Z","W"),("Z","V")]:
+        probs_per_run = []
+        for run_idx in range(N_RUNS):
+            # pick the run_idx-th record for this (b,t)
+            matches = [rr for (cmb, rr) in all_runs if cmb==(b,t)]
+            rr = matches[run_idx]
+            # map back to strings for plotting
+            dd = {"00":0.0,"01":0.0,"10":0.0,"11":0.0}
+            for (a,b2), p in rr.probs.items():
+                dd[f"{a}{b2}"] = p
+            probs_per_run.append([dd[k] for k in order])
 
-    tags = ["ZW", "ZV", "XW", "XV"]
-    x = np.arange(len(tags))
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    ax.bar(x, summary.E_mean, yerr=summary.E_std, capsize=4)
-    ax.axhline( 1/np.sqrt(2), linestyle="--", linewidth=1)
-    ax.axhline(-1/np.sqrt(2), linestyle="--", linewidth=1)
-    ax.set_xticks(x, tags)
-    ax.set_ylim(-1.05, 1.05)
-    ax.set_ylabel("Correlation  E")
-    ax.set_title("CHSH Correlators (mean ± 1σ over runs)")
-    ax.text(0.98, 0.05, r"$\pm 1/\sqrt{2}$ ref.", transform=ax.transAxes, ha="right", va="bottom")
-    if SAVE_FIGS:
-        fig.savefig(f"{save_prefix}.pdf")
-        fig.savefig(f"{save_prefix}.png")
-    if SHOW_FIGS:
-        plt.show()
-    plt.close(fig)
+        x = np.arange(len(order))
+        width = 0.12
+        fig, ax = plt.subplots(figsize=(8,4.5))
+        for i in range(N_RUNS):
+            ax.bar(x + i*width - (N_RUNS-1)*width/2, probs_per_run[i], width, label=f"Run {i+1}")
+        ax.set_xticks(x, order)
+        ax.set_ylim(0, 1.0)
+        ax.set_ylabel("Probability")
+        ax.set_title(f"Outcome probabilities for {b}⊗{t}")
+        ax.legend(ncols=min(N_RUNS,5), fontsize=8)
+        fig.tight_layout()
+        fig.savefig(os.path.join(OUTDIR, f"prob_{b}{t}.png"), dpi=300, bbox_inches="tight")
+        fig.savefig(os.path.join(OUTDIR, f"prob_{b}{t}.pdf"), bbox_inches="tight")
+        plt.close(fig)
 
-def plot_S_hist(summary: Summary, save_prefix: str = "fig_S_hist"):
-    """
-    Histogram of |S| across runs with classical (2) and Tsirelson (2√2) reference lines.
-    Saves PDF and PNG if SAVE_FIGS is True.
-    """
-    plt = _apply_mdpi_rc()
-    import matplotlib.pyplot as plt
+def save_tables(E_by_run: List[Dict[str,float]], all_runs: List[Tuple[Tuple[str,str], RunResult]]):
+    # Table: E and S per run (CSV + TeX)
+    import csv
+    cols = ["E_ZW","E_ZV","E_XW","E_XV","S"]
+    with open(os.path.join(OUTDIR, "table_E_S_by_run.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["run"]+cols)
+        for i,row in enumerate(E_by_run):
+            w.writerow([i] + [row[c] for c in cols])
+    with open(os.path.join(OUTDIR, "table_E_S_by_run.tex"), "w") as f:
+        f.write("\\begin{tabular}{lccccc}\\toprule\nRun & $E_{ZW}$ & $E_{ZV}$ & $E_{XW}$ & $E_{XV}$ & $S$\\\\\\midrule\n")
+        for i,row in enumerate(E_by_run):
+            f.write(f"{i+1} & {row['E_ZW']:+.6f} & {row['E_ZV']:+.6f} & {row['E_XW']:+.6f} & {row['E_XV']:+.6f} & {row['S']:+.6f}\\\\\n")
+        f.write("\\bottomrule\\end{tabular}\n")
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    ax.hist(summary.s_abs_values, bins=min(10, max(3, summary.n_runs // 1)))
-    ax.axvline(2.0, linestyle="--", linewidth=1)
-    ax.axvline(2*np.sqrt(2), linestyle="--", linewidth=1)
-    ax.set_xlabel(r"$|S|$")
-    ax.set_ylabel("Count")
-    ax.set_title(r"Distribution of $|S|$ across runs")
-    ax.text(0.02, 0.84, "Classical bound = 2", transform=ax.transAxes, va="top")
-    ax.text(0.02, 0.74, r"Tsirelson bound = $2\sqrt{2}$", transform=ax.transAxes, va="top")
-    if SAVE_FIGS:
-        fig.savefig(f"{save_prefix}.pdf")
-        fig.savefig(f"{save_prefix}.png")
-    if SHOW_FIGS:
-        plt.show()
-    plt.close(fig)
+    # Table: joint probabilities for the FIRST run of each measurement (CSV + TeX)
+    # (bitstrings listed as 00,01,10,11)
+    first_probs = {("X","W"):None,("X","V"):None,("Z","W"):None,("Z","V"):None}
+    for (cmb, rr) in all_runs:
+        if first_probs[cmb] is None:
+            first_probs[cmb] = rr
+    order = ["00","01","10","11"]
+    import csv
+    with open(os.path.join(OUTDIR, "table_joint_probs.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["bitstring","X⊗W","X⊗V","Z⊗W","Z⊗V"])
+        for bs in order:
+            def getp(b,t):
+                dd = { (0,0):0,(0,1):0,(1,0):0,(1,1):0}
+                for (a,b2),p in first_probs[(b,t)].probs.items():
+                    dd[(a,b2)] = p
+                a,b2 = int(bs[0]), int(bs[1])
+                return dd[(a,b2)]
+            w.writerow([bs, getp("X","W"), getp("X","V"), getp("Z","W"), getp("Z","V")])
 
-# ---------------- Pretty printing ----------------
-
-def print_run(res: dict):
-    print("\nRun results:")
-    for tag in ["ZW", "ZV", "XW", "XV"]:
-        print(f"  {tag}: E = {res[tag]['E']:+.6f}  counts = {res[tag]['counts']}")
-    print(f"  S   = {res['S']:+.6f}")
-    print(f"  |S| = {res['|S|']:.6f}")
-
-def print_summary(summary: Summary):
-    tags = ["ZW", "ZV", "XW", "XV"]
-    print("\n====== Summary over runs ======")
-    for i, tag in enumerate(tags):
-        print(f"E_{tag}: mean = {summary.E_mean[i]:+.6f} , std = {summary.E_std[i]:.6f}")
-    print(f"\n|S| values: {', '.join(f'{v:.6f}' for v in summary.s_abs_values)}")
-    print(f"mean(|S|)  = {summary.mean_abs_s:.6f}")
-    print(f"std(|S|)   = {summary.std_abs_s:.6f}")
-    print("Reference: ideal E = ±1/√2 ≈ ±0.7071, ideal |S| = 2√2 ≈ 2.8284")
+    with open(os.path.join(OUTDIR, "table_joint_probs.tex"), "w") as f:
+        f.write("\\begin{tabular}{lcccc}\\toprule\nBitstring & $X\\otimes W$ & $X\\otimes V$ & $Z\\otimes W$ & $Z\\otimes V$\\\\\\midrule\n")
+        for bs in order:
+            def getp(b,t):
+                dd = { (0,0):0,(0,1):0,(1,0):0,(1,1):0}
+                for (a,b2),p in first_probs[(b,t)].probs.items():
+                    dd[(a,b2)] = p
+                a,b2 = int(bs[0]), int(bs[1])
+                    # value exists after dict fill
+                return dd[(a,b2)]
+            f.write(f"{bs} & {getp('X','W'):.6f} & {getp('X','V'):.6f} & {getp('Z','W'):.6f} & {getp('Z','V'):.6f}\\\\\n")
+        f.write("\\bottomrule\\end{tabular}\n")
 
 # ---------------- Main ----------------
-
 if __name__ == "__main__":
-    # One illustrative run (mirrors the assignment’s Task 1 output)
-    single = run_all(shots=SHOTS)
-    print_run(single)
+    # Save lab-exact circuit schematics first (so you can compare visually)
+    save_circuit_images()
 
-    # Task 2.1: repeat n_runs times and compute mean/std of |S|
-    summary, runs = repeat_and_summarize(n_runs=N_RUNS, shots=SHOTS, base_seed=BASE_SEED)
-    print_summary(summary)
+    combos, per_run, E_by_run = run_all(SHOTS, N_RUNS)
+    save_probability_plots(per_run)
+    save_tables(E_by_run, per_run)
 
-    # MDPI-style figures
-    plot_E_bars(summary, save_prefix="fig_E_bars_chsh")
-    plot_S_hist(summary, save_prefix="fig_S_hist_chsh")
-
-    print("\nFigures saved as PDF (vector) and PNG (300 dpi):")
-    print("  - fig_E_bars_chsh.pdf  /  fig_E_bars_chsh.png")
-    print("  - fig_S_hist_chsh.pdf  /  fig_S_hist_chsh.png")
+    # Quick textual summary
+    absS = [abs(row["S"]) for row in E_by_run]
+    print("\n====== Summary over runs (lab rule: top=W/V, bottom=X/Z) ======")
+    for k in ("E_ZW","E_ZV","E_XW","E_XV"):
+        arr = [row[k] for row in E_by_run]
+        print(f"{k}: mean = {np.mean(arr):+.6f} , std = {np.std(arr, ddof=1):.6f}")
+    print(f"\n|S| values: " + ", ".join(f"{v:.6f}" for v in absS))
+    print(f"mean(|S|)  = {np.mean(absS):.6f}")
+    print(f"std(|S|)   = {np.std(absS, ddof=1):.6f}")
+    print(f"\nSaved files in {OUTDIR}/:")
+    print("  - circ_XW/XV/ZW/ZV.(pdf|png)")
+    print("  - prob_XW/XV/ZW/ZV.(pdf|png)")
+    print("  - table_E_S_by_run.(csv|tex), table_joint_probs.(csv|tex)")
