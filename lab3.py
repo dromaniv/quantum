@@ -1,156 +1,214 @@
-# BB84 (prepare-and-measure) simulation in modern Qiskit
-# Tested with: qiskit>=2.x, qiskit-aer>=0.17
-# Install (if needed):
-#   pip install "qiskit[visualization]" qiskit-aer
+# lab3.py - BB84 protocol simulation
 
-from __future__ import annotations
-
-from typing import List, Tuple, Dict
-from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+from qiskit import QuantumRegister, ClassicalRegister, QuantumCircuit
+from qiskit_aer import Aer
 from qiskit.compiler import transpile
-from qiskit_aer import AerSimulator
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Create results folder if it doesn't exist
+import os
+
+os.makedirs("l3_results", exist_ok=True)
+
+# -----------------------------------------------------------
+# 1. Build the BB84 quantum circuit (Alice + Bob)
+# -----------------------------------------------------------
+
+nx = 4
+q = QuantumRegister(nx, "q")
+c = ClassicalRegister(nx, "c")
+circuit = QuantumCircuit(q, c)
+
+# Initialize qubits to |0>
+circuit.reset([q[0], q[1], q[2], q[3]])
+
+# --- Alice's random bits xA and yA ---
+circuit.h(q[1])
+circuit.measure(q[1], c[1])
+
+circuit.h(q[2])
+circuit.measure(q[2], c[2])
+
+circuit.barrier(q[0], q[1], q[2], q[3])
+
+# --- Alice's encoding ---
+circuit.cx(q[1], q[0])
+circuit.ch(q[2], q[0])
+
+circuit.barrier(q[0], q[1], q[2], q[3])
+
+# --- Bob's random basis yB ---
+circuit.h(q[3])
+circuit.measure(q[3], c[3])
+
+circuit.barrier(q[0], q[1], q[2], q[3])
+
+# --- Bob's decoding and measurement xB ---
+circuit.ch(q[3], q[0])
+circuit.measure(q[0], c[0])
+
+circuit.barrier(q[0], q[1], q[2], q[3])
+
+# --------- NEW: plot and save circuit diagram ----------
+# This will create bb84_circuit.png in the current folder
+fig = circuit.draw(output="mpl")
+plt.tight_layout()
+plt.savefig("l3_results/bb84_circuit.png", dpi=300)
+plt.close()
+# -----------------------------------------------------------
 
 
-def build_bb84_round_circuit() -> QuantumCircuit:
+# -----------------------------------------------------------
+# 2. Helper functions: running and sifting
+# -----------------------------------------------------------
+
+def run_experiment_bits_result(circ, backend, executions: int, shots: int = 1):
     """
-    One BB84 'round' circuit that:
-      - uses qubit q1 (after H+measure) as Alice's random bit x_A
-      - uses qubit q2 (after H+measure) as Alice's random basis y_A
-      - encodes on data qubit q0 via CX (for x_A) and CH (for y_A)
-      - uses qubit q3 (after H+measure) as Bob's random basis y_B
-      - decodes on q0 via CH (controlled by y_B), measures x_B
-    Classical bits (c[0..3]) store [x_B, x_A, y_A, y_B] respectively.
-    Keys returned by the backend will list bits as 'yB yA xA xB' (c3 c2 c1 c0).
+    Run the given circuit 'executions' times with 'shots' shots each
+    (slides use shots=1 in a loop), and collect [xA, yA, yB, xB].
+    Bitstring format: { 'yB yA xA xB' : 1 }.
     """
-    q = QuantumRegister(4, "q")  # [q0=data, q1=Alice bit, q2=Alice basis, q3=Bob basis]
-    c = ClassicalRegister(4, "c")  # [c0=x_B, c1=x_A, c2=y_A, c3=y_B]
-    qc = QuantumCircuit(q, c, name="bb84_round")
+    bits = []
 
-    # Ensure a clean start
-    qc.reset(q)
+    for _ in range(executions):
+        compiled = transpile(circ, backend)
+        job = backend.run(compiled, shots=shots)
+        result = job.result().get_counts(circ)
 
-    # --- Alice's randomness ---
-    # x_A (random bit)
-    qc.h(q[1])
-    qc.measure(q[1], c[1])
+        key = list(result.keys())[0]
 
-    # y_A (random basis: 0->Z, 1->X)
-    qc.h(q[2])
-    qc.measure(q[2], c[2])
+        # 'yB yA xA xB'
+        yB = int(key[0])
+        yA = int(key[1])
+        xA = int(key[2])
+        xB = int(key[3])
 
-    qc.barrier()
+        bits.append([xA, yA, yB, xB])
 
-    # --- Alice's encoding on the data qubit q0 ---
-    # Encode bit (flip if x_A==1)
-    qc.cx(q[1], q[0])
-    # Encode basis (apply H if y_A==1)
-    qc.ch(q[2], q[0])
-
-    qc.barrier()
-
-    # --- Bob's randomness y_B and decoding ---
-    qc.h(q[3])               # y_B random basis selector
-    qc.measure(q[3], c[3])   # store y_B
-    qc.barrier()
-
-    # Apply H to data iff y_B==1 (controlled by q3)
-    qc.ch(q[3], q[0])
-
-    # Bob measures data -> x_B
-    qc.measure(q[0], c[0])
-
-    qc.barrier()
-    return qc
+    return bits
 
 
-def run_bb84(sample: int = 10, seed: int | None = None) -> Tuple[List[List[int]], Dict[str, int], QuantumCircuit]:
+def sift_key(bits):
     """
-    Execute 'sample' independent BB84 rounds by running the same circuit multiple shots.
-    Returns:
-      bit_quads: list of [xA, yA, yB, xB] per shot
-      counts: raw counts from the simulator (bitstring 'yB yA xA xB')
-      qc: the compiled circuit (for inspection/plotting)
+    Key sifting as in the slides: keep only positions where yA == yB.
+    Returns (length, keyA, keyB).
     """
-    backend = AerSimulator()
-    qc = build_bb84_round_circuit()
-    tqc = transpile(qc, backend)
+    keyA = []
+    keyB = []
 
-    # Run all rounds in one job (shots = sample)
-    job = backend.run(tqc, shots=sample, seed_simulator=seed)
-    result = job.result()
-    counts = result.get_counts(tqc)
-
-    # Parse counts strings: 'yB yA xA xB' (c3 c2 c1 c0)
-    bit_quads: List[List[int]] = []
-    for bitstring, reps in counts.items():
-        yB = int(bitstring[0])
-        yA = int(bitstring[1])
-        xA = int(bitstring[2])
-        xB = int(bitstring[3])
-        for _ in range(reps):
-            bit_quads.append([xA, yA, yB, xB])
-
-    return bit_quads, counts, qc
-
-
-def sift_key(bit_quads: List[List[int]]) -> Tuple[List[int], List[int]]:
-    """
-    Keep bits where y_A == y_B. Returns (keyA, keyB).
-    """
-    keyA, keyB = [], []
-    for xA, yA, yB, xB in bit_quads:
+    for xA, yA, yB, xB in bits:
         if yA == yB:
             keyA.append(xA)
             keyB.append(xB)
-    return keyA, keyB
+
+    return len(keyA), keyA, keyB
 
 
-def bb84_trial(sample: int, seed: int | None = None) -> Tuple[List[int], List[int], List[List[int]]]:
-    """
-    Run a single trial of 'sample' rounds and return (keyA, keyB, bit_quads).
-    """
-    bits, counts, _ = run_bb84(sample=sample, seed=seed)
-    keyA, keyB = sift_key(bits)
-    # Sanity check (no eavesdropper in this ideal simulation)
-    assert keyA == keyB, "Keys should match in a noiseless simulation."
-    return keyA, keyB, bits
-
-
-def experiment_table(samples=(16, 32, 64, 128, 256), trials: int = 3, seed: int | None = None) -> Dict[int, List[int]]:
-    """
-    For each sample size n, run 'trials' independent tests and record the sifted-key length.
-    Returns a dict: { n: [len_trial1, len_trial2, ...] }
-    """
-    out: Dict[int, List[int]] = {}
-    base_seed = seed
-    for idx, n in enumerate(samples):
-        lengths = []
-        for t in range(trials):
-            # Optionally vary seed for reproducibility without removing randomness entirely
-            trial_seed = None if base_seed is None else (base_seed + 1000 * idx + t)
-            keyA, keyB, _ = bb84_trial(sample=n, seed=trial_seed)
-            lengths.append(len(keyA))
-        out[n] = lengths
-    return out
-
+# -----------------------------------------------------------
+# 3. Main program: single-shot demo + table + logging
+# -----------------------------------------------------------
 
 if __name__ == "__main__":
-    # Demo run (mirrors the slide’s printed output style)
+    backend = Aer.get_backend("qasm_simulator")
+
+    # -------------------------------
+    # Single test run (like slide 16)
+    # -------------------------------
+    compiled_circuit = transpile(circuit, backend)
+    job_single = backend.run(compiled_circuit, shots=1)
+    result_single = job_single.result()
+    wyniki = result_single.get_counts(circuit)
+
+    print("Single run result (format {'yB yA xA xB': 1}):")
+    print(wyniki)
+
+    key = list(wyniki.keys())[0]
+    yB = int(key[0])
+    yA = int(key[1])
+    xA = int(key[2])
+    xB = int(key[3])
+    print("Parsed bits -> [xA, yA, yB, xB] =", [xA, yA, yB, xB])
+    print()
+
+    # -------------------------------
+    # 10-sample demo (like slide 17)
+    # -------------------------------
     sample = 10
-    bits, counts, qc = run_bb84(sample=sample, seed=None)
-    print("Raw counts (format {'yB yA xA xB': count}):", counts)
+    bits = []
 
-    for row in bits:
-        xA, yA, yB, xB = row
-        print(f"[xA,yA,yB,xB] = {row}")
+    print(f"Generating {sample} raw results:")
+    for kk in range(sample):
+        compiled = transpile(circuit, backend)
+        job = backend.run(compiled, shots=1)
+        res = job.result()
+        wynik = res.get_counts(circuit)
 
-    keyA, keyB = sift_key(bits)
+        key = list(wynik.keys())[0]
+        yB = int(key[0])
+        yA = int(key[1])
+        xA = int(key[2])
+        xB = int(key[3])
+
+        print(wynik, "->", [xA, yA, yB, xB])
+        bits.append([xA, yA, yB, xB])
+
+    print("All bits:", bits)
+    print()
+
+    # -------------------------------
+    # Key sifting demo (slide 18)
+    # -------------------------------
+    sift_len, keyA, keyB = sift_key(bits)
+
+    print("Key sifting (keep positions where yA == yB):")
+    for xA, yA, yB, xB in bits:
+        if yA == yB:
+            print(f"yA={yA}, yB={yB} -> xA={xA}, xB={xB}")
+
     print("kluczA =", keyA)
     print("kluczB =", keyB)
     print("kluczA == kluczB ?", keyA == keyB)
+    print()
 
-    # Fill the table for your report (Test 1..3 lengths per n)
-    table = experiment_table(samples=(16, 32, 64, 128, 256), trials=3, seed=None)
-    print("\nTable: sifted key lengths per n (trials columns):")
-    for n, lens in table.items():
-        print(f"n={n}: {lens}")
+    # -------------------------------
+    # Final experiment table (slide 19)
+    # -------------------------------
+    samples = [16, 32, 64, 128, 256]
+    tests = 3
+    shots = 1
+
+    results_rows = []
+
+    for n in samples:
+        row = [n]
+        for t in range(tests):
+            bits_n = run_experiment_bits_result(circuit, backend, executions=n, shots=shots)
+            sift_len_n, _, _ = sift_key(bits_n)
+            row.append(sift_len_n)
+        results_rows.append(row)
+
+    df = pd.DataFrame(results_rows, columns=["Sample = n", "Test 1", "Test 2", "Test 3"])
+
+    print("Final table: length of sifted key vs n")
+    print(df.to_string(index=False))
+    print()
+
+    # --------- NEW: save & print report-friendly formats ----------
+
+    # 1) Save as CSV (you can import this in Excel / LibreOffice)
+    df.to_csv("l3_results/bb84_results.csv", index=False)
+    print("Saved results to bb84_results.csv")
+
+    # 2) Print LaTeX table (paste directly into your report)
+    print("\nLaTeX table (for your report):\n")
+    print(df.to_latex(index=False))
+
+    # 3) Optional: simple Markdown table (if you write the report in Markdown)
+    try:
+        print("\nMarkdown table:\n")
+        print(df.to_markdown(index=False))
+    except AttributeError:
+        # to_markdown may require tabulate; ignore if not available
+        pass
